@@ -1,6 +1,8 @@
 #!/usr/bin/env npx tsx
+import { mkdir, writeFile } from 'fs/promises'
+import path from 'path'
 import prisma from '@/lib/db'
-import { ftsSearch } from '@/lib/fts'
+import { ftsSearch, rebuildFts } from '@/lib/fts'
 import { extractKeywords } from '@/lib/search-utils'
 
 // ─── Output ──────────────────────────────────────────────────────────────────
@@ -228,6 +230,248 @@ async function cmdStats() {
   })
 }
 
+async function downloadMedia(url: string): Promise<Buffer | null> {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(20_000) })
+    if (!response.ok) return null
+    return Buffer.from(await response.arrayBuffer())
+  } catch {
+    return null
+  }
+}
+
+function mediaExt(type: string, url: string): string {
+  if (type === 'video' || type === 'gif') return '.mp4'
+  try {
+    const pathname = new URL(url).pathname.toLowerCase()
+    if (pathname.endsWith('.png')) return '.png'
+    if (pathname.endsWith('.webp')) return '.webp'
+    if (pathname.endsWith('.gif')) return '.gif'
+  } catch {
+    // ignore
+  }
+  return '.jpg'
+}
+
+/**
+ * Export search hits to a local folder (no UI clicking).
+ * Usage:
+ *   siftly export-search "mobile app ios android" --out exports/mobile --media
+ *   siftly export-search --queries "react native,flutter,aso,mobile ui" --out exports/mobile --media
+ */
+async function ftsMatchRaw(matchQuery: string, limit: number): Promise<string[]> {
+  try {
+    await prisma.$executeRawUnsafe(`SELECT 1 FROM bookmark_fts LIMIT 1`)
+  } catch {
+    return []
+  }
+
+  try {
+    const results = await prisma.$queryRaw<{ bookmark_id: string }[]>`
+      SELECT bookmark_id FROM bookmark_fts
+      WHERE bookmark_fts MATCH ${matchQuery}
+      ORDER BY rank
+      LIMIT ${limit}
+    `
+    return results.map((r) => r.bookmark_id)
+  } catch {
+    return []
+  }
+}
+
+async function cmdExportSearch(args: string[]) {
+  const { positional, flags } = parseArgs(args)
+
+  const queries: string[] = []
+  if (flags.queries) {
+    queries.push(...flags.queries.split(',').map((q) => q.trim()).filter(Boolean))
+  }
+  if (positional.length > 0) {
+    queries.push(positional.join(' '))
+  }
+  if (queries.length === 0) {
+    die('Usage: siftly export-search <query> [--queries q1,q2] [--out dir] [--media] [--rebuild-fts] [--mode or|and]')
+  }
+
+  const outDir = path.resolve(flags.out ?? path.join('exports', 'search-export'))
+  const withMedia = flags.media === 'true'
+  const limit = Math.min(parseInt(flags.limit ?? '500', 10) || 500, 1000)
+  const mode = (flags.mode ?? 'or').toLowerCase() === 'and' ? 'and' : 'or'
+
+  if (flags['rebuild-fts'] === 'true') {
+    await rebuildFts()
+  }
+
+  const idSet = new Set<string>()
+  const queryHits: Record<string, number> = {}
+
+  for (const query of queries) {
+    // Allow raw FTS operators if the query already contains them
+    const isRawFts = /["*()]|\bOR\b|\bAND\b|\bNEAR\b/i.test(query)
+    let ids: string[] = []
+
+    if (isRawFts) {
+      ids = await ftsMatchRaw(query, limit)
+    } else {
+      const keywords = extractKeywords(query)
+      if (keywords.length === 0) continue
+
+      const terms = keywords
+        .map((kw) => kw.replace(/["*()]/g, ' ').trim())
+        .filter((kw) => kw.length >= 2)
+      const matchQuery = terms.join(mode === 'and' ? ' AND ' : ' OR ')
+      ids = await ftsMatchRaw(matchQuery, limit)
+
+      if (ids.length === 0) {
+        const likeHits = await prisma.bookmark.findMany({
+          where: {
+            OR: keywords.flatMap((kw) => [
+              { text: { contains: kw } },
+              { semanticTags: { contains: kw } },
+              { entities: { contains: kw } },
+            ]),
+          },
+          select: { id: true },
+          take: limit,
+        })
+        ids = likeHits.map((b) => b.id)
+      }
+    }
+
+    queryHits[query] = ids.length
+    for (const id of ids.slice(0, limit)) idSet.add(id)
+  }
+
+  const ids = [...idSet]
+  if (ids.length === 0) {
+    die('No bookmarks matched the search queries')
+  }
+
+  const bookmarks = await prisma.bookmark.findMany({
+    where: { id: { in: ids } },
+    include: {
+      mediaItems: true,
+      categories: {
+        include: { category: { select: { name: true, slug: true, color: true } } },
+        orderBy: { confidence: 'desc' },
+      },
+    },
+    orderBy: [{ tweetCreatedAt: 'desc' }, { importedAt: 'desc' }],
+  })
+
+  await mkdir(outDir, { recursive: true })
+  const mediaDir = path.join(outDir, 'media')
+  if (withMedia) await mkdir(mediaDir, { recursive: true })
+
+  const exported = []
+  let mediaSaved = 0
+  let mediaFailed = 0
+
+  for (const b of bookmarks) {
+    const tweetUrl =
+      b.authorHandle && b.authorHandle !== 'unknown'
+        ? `https://x.com/${b.authorHandle}/status/${b.tweetId}`
+        : `https://x.com/i/status/${b.tweetId}`
+
+    const localMedia: { type: string; url: string; localPath: string | null }[] = []
+
+    for (let i = 0; i < b.mediaItems.length; i++) {
+      const item = b.mediaItems[i]
+      let localPath: string | null = null
+
+      if (withMedia) {
+        const ext = mediaExt(item.type, item.url)
+        const filename = `${b.tweetId}_${i}${ext}`
+        const dest = path.join(mediaDir, filename)
+        const data = await downloadMedia(item.url)
+        if (data) {
+          await writeFile(dest, data)
+          localPath = path.join('media', filename)
+          mediaSaved++
+        } else {
+          mediaFailed++
+        }
+      }
+
+      localMedia.push({ type: item.type, url: item.url, localPath })
+    }
+
+    exported.push({
+      id: b.id,
+      tweetId: b.tweetId,
+      tweetUrl,
+      text: b.text,
+      authorHandle: b.authorHandle,
+      authorName: b.authorName,
+      source: b.source,
+      tweetCreatedAt: b.tweetCreatedAt?.toISOString() ?? null,
+      semanticTags: safeParse(b.semanticTags),
+      entities: safeParse(b.entities),
+      categories: b.categories.map((bc) => ({
+        name: bc.category.name,
+        slug: bc.category.slug,
+        confidence: bc.confidence,
+      })),
+      mediaItems: localMedia,
+    })
+  }
+
+  const jsonPath = path.join(outDir, 'bookmarks.json')
+  await writeFile(jsonPath, JSON.stringify({
+    exportedAt: new Date().toISOString(),
+    queries,
+    queryHits,
+    count: exported.length,
+    bookmarks: exported,
+  }, null, 2), 'utf8')
+
+  const mdLines = [
+    `# Siftly search export`,
+    ``,
+    `- Exported: ${new Date().toISOString()}`,
+    `- Queries: ${queries.map((q) => `\`${q}\``).join(', ')}`,
+    `- Matches: **${exported.length}**`,
+    withMedia ? `- Media saved: ${mediaSaved} (failed: ${mediaFailed})` : `- Media: urls only (pass --media to download)`,
+    ``,
+    `---`,
+    ``,
+  ]
+
+  for (const b of exported) {
+    const cats = b.categories.map((c) => c.name).join(', ') || '—'
+    mdLines.push(`## ${b.authorHandle} — ${b.tweetId}`)
+    mdLines.push(``)
+    mdLines.push(b.text.replace(/\n+/g, ' ').trim())
+    mdLines.push(``)
+    mdLines.push(`- Link: ${b.tweetUrl}`)
+    mdLines.push(`- Categories: ${cats}`)
+    if (b.mediaItems.length > 0) {
+      const mediaList = b.mediaItems
+        .map((m) => m.localPath ?? m.url)
+        .join(', ')
+      mdLines.push(`- Media: ${mediaList}`)
+    }
+    mdLines.push(``)
+  }
+
+  const mdPath = path.join(outDir, 'index.md')
+  await writeFile(mdPath, mdLines.join('\n'), 'utf8')
+
+  output({
+    outDir,
+    queries,
+    queryHits,
+    count: exported.length,
+    mediaSaved,
+    mediaFailed,
+    files: {
+      json: jsonPath,
+      markdown: mdPath,
+      media: withMedia ? mediaDir : null,
+    },
+  })
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function safeParse(json: string | null): unknown {
@@ -268,6 +512,8 @@ const COMMANDS: Record<string, string> = {
   show: 'show <id|tweetId>         Full bookmark detail',
   categories: 'categories                List categories with counts',
   stats: 'stats                     Library statistics',
+  'export-search':
+    'export-search <query> [--queries q1,q2] [--out dir] [--media] [--rebuild-fts] [--limit N]',
 }
 
 async function main() {
@@ -299,6 +545,9 @@ async function main() {
         break
       case 'stats':
         await cmdStats()
+        break
+      case 'export-search':
+        await cmdExportSearch(rest)
         break
       default:
         die(`Unknown command: ${command}. Run 'siftly --help' for usage.`)

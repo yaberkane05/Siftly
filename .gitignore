@@ -70,3 +70,5 @@ promo-video/
 *.swp
 *.swo
 *~
+
+exports/

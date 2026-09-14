@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Sparkles, Search, Loader2, BookMarked, AlertCircle, ImageIcon } from 'lucide-react'
+import { Sparkles, Search, Loader2, BookMarked, AlertCircle, ImageIcon, Download, Check } from 'lucide-react'
 import BookmarkCard from '@/components/bookmark-card'
 import type { BookmarkWithMedia } from '@/lib/types'
 
@@ -35,16 +35,16 @@ export default function AISearchPage() {
   const [imageStats, setImageStats] = useState<ImageStats | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [pipelineRunning, setPipelineRunning] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportMsg, setExportMsg] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     inputRef.current?.focus()
-    // Load image analysis progress
     fetch('/api/analyze/images')
       .then((r) => r.json())
       .then((data: ImageStats) => setImageStats(data))
       .catch(() => {})
-    // Hide standalone image analysis when the main pipeline is already handling it
     fetch('/api/categorize')
       .then((r) => r.json())
       .then((d: { status: string }) => {
@@ -57,7 +57,6 @@ export default function AISearchPage() {
     if (analyzing) return
     setAnalyzing(true)
     try {
-      // Run batches until ALL images are processed (no cap)
       while (true) {
         const res = await fetch('/api/analyze/images', {
           method: 'POST',
@@ -71,7 +70,6 @@ export default function AISearchPage() {
         if (data.remaining === 0) break
       }
     } catch {
-      // silent — refresh stats on error
       const statsRes = await fetch('/api/analyze/images')
       const stats = (await statsRes.json()) as ImageStats
       setImageStats(stats)
@@ -86,6 +84,7 @@ export default function AISearchPage() {
     setError('')
     setResults([])
     setExplanation('')
+    setExportMsg('')
     setSearched(true)
     try {
       const res = await fetch('/api/search/ai', {
@@ -108,6 +107,61 @@ export default function AISearchPage() {
     }
   }
 
+  async function handleExportResults() {
+    if (results.length === 0 || exporting) return
+    setExporting(true)
+    setExportMsg('')
+    try {
+      const reasons: Record<string, string> = {}
+      const scores: Record<string, number> = {}
+      for (const b of results) {
+        if (b.aiReason) reasons[b.id] = b.aiReason
+        if (typeof b.aiScore === 'number') scores[b.id] = b.aiScore
+      }
+
+      const res = await fetch('/api/export/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: results.map((b) => b.id),
+          query: query.trim(),
+          explanation,
+          reasons,
+          scores,
+          saveToDisk: true,
+        }),
+      })
+
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(data.error ?? 'Export failed')
+      }
+
+      const savedPath = res.headers.get('X-Siftly-Saved-Path')
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download =
+        res.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] ??
+        'siftly-ai-search.zip'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+
+      setExportMsg(
+        savedPath
+          ? `Exported ${results.length} results — saved under exports/ai-search/`
+          : `Downloaded ZIP with ${results.length} results`,
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Export failed')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       void handleSearch()
@@ -116,7 +170,6 @@ export default function AISearchPage() {
 
   function handleExampleClick(example: string) {
     setQuery(example)
-    // Use a short timeout so the state update propagates before the search fires
     setTimeout(() => {
       void handleSearch()
     }, 100)
@@ -124,7 +177,6 @@ export default function AISearchPage() {
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
-      {/* Header */}
       <div className="mb-6 text-center">
         <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-4">
           <Sparkles size={12} /> AI-Powered Search
@@ -137,7 +189,6 @@ export default function AISearchPage() {
         </p>
       </div>
 
-      {/* Search box */}
       <div className="relative mb-3">
         <textarea
           ref={inputRef}
@@ -163,7 +214,6 @@ export default function AISearchPage() {
       </div>
       <p className="text-xs text-zinc-600 mb-8 text-right">⌘+Enter to search</p>
 
-      {/* Image analysis status — hidden while main pipeline is running (it handles vision internally) */}
       {imageStats !== null && !pipelineRunning && (
         <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-zinc-900 border border-zinc-800 mb-6 text-xs">
           <ImageIcon size={13} className="text-zinc-500 shrink-0" />
@@ -193,7 +243,6 @@ export default function AISearchPage() {
         </div>
       )}
 
-      {/* Example queries — shown only before first search */}
       {!searched && (
         <div className="mb-8">
           <p className="text-xs text-zinc-600 mb-3 uppercase tracking-wider">Try these</p>
@@ -211,14 +260,12 @@ export default function AISearchPage() {
         </div>
       )}
 
-      {/* Error state */}
       {error && (
         <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm mb-6">
           <AlertCircle size={15} /> {error}
         </div>
       )}
 
-      {/* Empty state */}
       {searched && !loading && results.length === 0 && !error && (
         <div className="text-center py-16 text-zinc-600">
           <BookMarked size={36} className="mx-auto mb-3 opacity-30" />
@@ -226,15 +273,36 @@ export default function AISearchPage() {
         </div>
       )}
 
-      {/* Results */}
       {results.length > 0 && (
         <div>
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-sm text-zinc-400">{explanation}</p>
-            <span className="text-xs text-zinc-600">
-              {results.length} result{results.length !== 1 ? 's' : ''}
-            </span>
+          <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+            <p className="text-sm text-zinc-400 flex-1 min-w-0">{explanation}</p>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-xs text-zinc-600">
+                {results.length} result{results.length !== 1 ? 's' : ''}
+              </span>
+              <button
+                onClick={() => void handleExportResults()}
+                disabled={exporting}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 disabled:opacity-50 text-zinc-200 text-xs font-medium transition-colors"
+                title="Download ZIP + save under exports/ai-search/"
+              >
+                {exporting ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : exportMsg ? (
+                  <Check size={12} className="text-emerald-400" />
+                ) : (
+                  <Download size={12} />
+                )}
+                {exporting ? 'Exporting…' : 'Export all'}
+              </button>
+            </div>
           </div>
+          {exportMsg && (
+            <div className="mb-4 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs">
+              {exportMsg}
+            </div>
+          )}
           <div className="flex flex-col gap-6">
             {results.map((b) => (
               <div key={b.id}>
@@ -244,7 +312,6 @@ export default function AISearchPage() {
                     <span className="text-xs text-indigo-400/80 leading-relaxed">{b.aiReason}</span>
                   </div>
                 )}
-                {/* Cast to BookmarkWithMedia since BookmarkCard does not use the AI-specific fields */}
                 <BookmarkCard bookmark={b as BookmarkWithMedia} />
               </div>
             ))}
@@ -252,7 +319,6 @@ export default function AISearchPage() {
         </div>
       )}
 
-      {/* Unused import guard — Search icon used as aria hint */}
       <span className="sr-only">
         <Search size={0} />
       </span>

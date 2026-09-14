@@ -204,3 +204,153 @@ export async function exportBookmarksJson(bookmarkIds?: string[]): Promise<strin
 
   return JSON.stringify(output, null, 2)
 }
+
+export interface SearchExportMeta {
+  query: string
+  explanation?: string
+  reasons?: Record<string, string>
+  scores?: Record<string, number>
+}
+
+/**
+ * ZIP export for AI Search results: manifest + JSON + downloaded media.
+ */
+export async function exportSearchResultsAsZip(
+  bookmarkIds: string[],
+  meta: SearchExportMeta,
+): Promise<Buffer> {
+  if (bookmarkIds.length === 0) {
+    throw new Error('No bookmarks to export')
+  }
+
+  const bookmarks = await fetchBookmarksFull({ id: { in: bookmarkIds } })
+  // Preserve AI search ranking order
+  const order = new Map(bookmarkIds.map((id, i) => [id, i]))
+  bookmarks.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
+
+  const zip = new JSZip()
+  const mediaFolder = zip.folder('media')
+
+  const rows: string[] = [
+    buildCsvRow(['rank', 'tweetId', 'text', 'author', 'url', 'categories', 'aiScore', 'aiReason', 'date']),
+  ]
+
+  const jsonBookmarks: object[] = []
+  let mediaIndex = 0
+
+  for (let rank = 0; rank < bookmarks.length; rank++) {
+    const bookmark = bookmarks[rank]
+    const tweetUrl =
+      bookmark.authorHandle && bookmark.authorHandle !== 'unknown'
+        ? `https://x.com/${bookmark.authorHandle}/status/${bookmark.tweetId}`
+        : `https://x.com/i/status/${bookmark.tweetId}`
+    const categoryNames = bookmark.categories.map((c) => c.category.name).join('; ')
+    const dateStr = bookmark.tweetCreatedAt?.toISOString() ?? ''
+    const aiScore = meta.scores?.[bookmark.id]
+    const aiReason = meta.reasons?.[bookmark.id] ?? ''
+
+    rows.push(
+      buildCsvRow([
+        String(rank + 1),
+        bookmark.tweetId,
+        bookmark.text,
+        bookmark.authorHandle,
+        tweetUrl,
+        categoryNames,
+        aiScore != null ? String(aiScore) : '',
+        aiReason,
+        dateStr,
+      ]),
+    )
+
+    const localMedia: { type: string; url: string; filename: string | null }[] = []
+    for (const item of bookmark.mediaItems) {
+      const ext = mediaExtension(item.type, item.url)
+      const filename = `${bookmark.tweetId}_${mediaIndex}${ext}`
+      mediaIndex++
+      const fileData = await downloadFile(item.url)
+      if (fileData && mediaFolder) {
+        mediaFolder.file(filename, fileData)
+        localMedia.push({ type: item.type, url: item.url, filename })
+      } else {
+        localMedia.push({ type: item.type, url: item.url, filename: null })
+      }
+    }
+
+    jsonBookmarks.push({
+      rank: rank + 1,
+      tweetId: bookmark.tweetId,
+      tweetUrl,
+      text: bookmark.text,
+      authorHandle: bookmark.authorHandle,
+      authorName: bookmark.authorName,
+      tweetCreatedAt: bookmark.tweetCreatedAt?.toISOString() ?? null,
+      aiScore: aiScore ?? null,
+      aiReason: aiReason || null,
+      categories: bookmark.categories.map((c) => ({
+        name: c.category.name,
+        slug: c.category.slug,
+      })),
+      mediaItems: localMedia,
+    })
+  }
+
+  zip.file('manifest.csv', rows.join('\n'))
+  zip.file(
+    'bookmarks.json',
+    JSON.stringify(
+      {
+        exportedAt: new Date().toISOString(),
+        query: meta.query,
+        explanation: meta.explanation ?? null,
+        count: jsonBookmarks.length,
+        bookmarks: jsonBookmarks,
+      },
+      null,
+      2,
+    ),
+  )
+
+  const md: string[] = [
+    `# AI Search export`,
+    ``,
+    `- Query: ${meta.query}`,
+    `- Exported: ${new Date().toISOString()}`,
+    `- Results: ${jsonBookmarks.length}`,
+    meta.explanation ? `- Summary: ${meta.explanation}` : '',
+    ``,
+    `---`,
+    ``,
+  ]
+
+  for (const b of jsonBookmarks as Array<{
+    rank: number
+    tweetId: string
+    tweetUrl: string
+    text: string
+    authorHandle: string
+    aiScore: number | null
+    aiReason: string | null
+    categories: { name: string }[]
+    mediaItems: { filename: string | null; url: string }[]
+  }>) {
+    md.push(`## ${b.rank}. @${b.authorHandle} — ${b.tweetId}`)
+    md.push(``)
+    md.push(b.text.replace(/\n+/g, ' ').trim())
+    md.push(``)
+    md.push(`- Link: ${b.tweetUrl}`)
+    if (b.aiScore != null) md.push(`- AI score: ${b.aiScore}`)
+    if (b.aiReason) md.push(`- Why: ${b.aiReason}`)
+    md.push(`- Categories: ${b.categories.map((c) => c.name).join(', ') || '—'}`)
+    if (b.mediaItems.length > 0) {
+      md.push(
+        `- Media: ${b.mediaItems.map((m) => (m.filename ? `media/${m.filename}` : m.url)).join(', ')}`,
+      )
+    }
+    md.push(``)
+  }
+
+  zip.file('index.md', md.filter((l) => l !== '').join('\n'))
+
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+}
