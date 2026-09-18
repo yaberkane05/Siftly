@@ -76,6 +76,18 @@ model ImportJob {
   updatedAt      DateTime @updatedAt
 }
 
+model SyncRun {
+  id           String    @id @default(cuid())
+  trigger      String    // json | x-sync | mcp
+  status       String    // running | done | error
+  imported     Int       @default(0)
+  skipped      Int       @default(0)
+  lastTweetId  String?
+  errorMessage String?
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+}
+
 model Setting {
   key   String @id
   value String

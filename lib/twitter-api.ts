@@ -87,7 +87,20 @@ export interface TweetResult {
 
 // ── Fetch + Parse ─────────────────────────────────────────────────────────────
 
-export async function fetchPage(authToken: string, ct0: string, cursor?: string) {
+export class TwitterAuthError extends Error {
+  status: number
+  constructor(status: number, detail: string) {
+    super(`Twitter API ${status}: ${detail.slice(0, 300)}`)
+    this.name = 'TwitterAuthError'
+    this.status = status
+  }
+}
+
+export async function fetchPage(
+  authToken: string,
+  ct0: string,
+  cursor?: string,
+): Promise<{ data: unknown; csrf: string | null }> {
   const variables = JSON.stringify({
     count: 100,
     includePromotedContent: false,
@@ -114,11 +127,16 @@ export async function fetchPage(authToken: string, ct0: string, cursor?: string)
 
   if (!res.ok) {
     const text = await res.text()
+    if (res.status === 401 || res.status === 403) {
+      throw new TwitterAuthError(res.status, text)
+    }
     throw new Error(`Twitter API ${res.status}: ${text.slice(0, 300)}`)
   }
 
+  const csrf = res.headers.get('x-csrf-token')
   try {
-    return await res.json()
+    const data = await res.json()
+    return { data, csrf }
   } catch {
     throw new Error('Twitter returned an invalid response (not JSON)')
   }

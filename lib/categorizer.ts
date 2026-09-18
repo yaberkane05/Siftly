@@ -136,19 +136,11 @@ interface CategorizationResult {
 }
 
 export async function seedDefaultCategories(): Promise<void> {
-  const existing = await prisma.category.findMany({ select: { slug: true } })
-  const existingSlugs = new Set(existing.map((c) => c.slug))
+  const count = await prisma.category.count()
+  if (count > 0) return
 
   for (const cat of DEFAULT_CATEGORIES) {
-    if (existingSlugs.has(cat.slug)) {
-      // Sync name, color, and description so renames/updates propagate to existing DBs
-      await prisma.category.update({
-        where: { slug: cat.slug },
-        data: { name: cat.name, color: cat.color, description: cat.description },
-      })
-    } else {
-      await prisma.category.create({ data: { ...cat } })
-    }
+    await prisma.category.create({ data: { ...cat } })
   }
 }
 
@@ -314,9 +306,10 @@ export async function writeCategoryResults(results: CategorizationResult[]): Pro
   const bookmarkIdsToUpdate: string[] = []
 
   for (const result of results) {
-    if (!result.tweetId || result.assignments.length === 0) continue
+    if (!result.tweetId) continue
     const bookmarkId = bookmarkByTweetId.get(result.tweetId)
     if (!bookmarkId) continue
+    bookmarkIdsToUpdate.push(bookmarkId)
 
     for (const { category: slug, confidence } of result.assignments) {
       const categoryId = categoryBySlug.get(slug)
@@ -329,12 +322,14 @@ export async function writeCategoryResults(results: CategorizationResult[]): Pro
         }),
       )
     }
-    bookmarkIdsToUpdate.push(bookmarkId)
   }
 
-  if (upsertOps.length === 0) return
+  if (bookmarkIdsToUpdate.length === 0) return
 
   await prisma.$transaction([
+    prisma.bookmarkCategory.deleteMany({
+      where: { bookmarkId: { in: bookmarkIdsToUpdate } },
+    }),
     ...upsertOps,
     prisma.bookmark.updateMany({
       where: { id: { in: bookmarkIdsToUpdate } },

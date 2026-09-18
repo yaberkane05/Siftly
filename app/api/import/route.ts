@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { parseBookmarksJson } from '@/lib/parser'
+import { recordSyncRun } from '@/lib/x-sync'
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let formData: FormData
@@ -122,6 +123,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       status: 'done',
       processedCount: importedCount,
     },
+  })
+
+  const lastTweetId = parsedBookmarks.find((b) => b.tweetId && !b.tweetId.startsWith('http'))?.tweetId ?? null
+  await recordSyncRun({
+    trigger: 'json',
+    status: 'done',
+    imported: importedCount,
+    skipped: skippedCount,
+    lastTweetId,
   })
 
   return NextResponse.json({

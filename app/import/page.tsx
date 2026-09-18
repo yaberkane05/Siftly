@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import Link from 'next/link'
-import { Upload, CheckCircle, ChevronRight, Loader2, Copy, Check, ExternalLink, Sparkles, Eye, Tag, Brain, Layers, StopCircle, RefreshCw, Clock, KeyRound, Trash2, AlertCircle, User, LogOut } from 'lucide-react'
+import { Upload, CheckCircle, ChevronRight, Loader2, Copy, Check, ExternalLink, Sparkles, Eye, Tag, Brain, Layers, StopCircle, RefreshCw, Clock, AlertCircle, LogOut } from 'lucide-react'
 import * as Progress from '@radix-ui/react-progress'
 
 type Step = 1 | 2 | 3
@@ -648,59 +648,49 @@ function ConsoleTab({ onFile, importSource }: { onFile: (file: File) => void; im
   )
 }
 
-// ── Live Import Tab (OAuth 2.0 PKCE) ─────────────────────────────────────────
+// ── Live Import Tab (Playwright session + GraphQL) ────────────────────────────
 
-interface OAuthStatus {
-  configured: boolean
+type XSessionStatus = 'ok' | 'needs_browser' | 'expired'
+
+interface LiveSession {
+  status: XSessionStatus
   connected: boolean
-  tokenExpired?: boolean
-  user?: { id?: string; name?: string; username?: string } | null
-  error?: string
+  lastSync: string | null
 }
 
 function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void }) {
-  const [status, setStatus] = useState<OAuthStatus | null>(null)
+  const [session, setSession] = useState<LiveSession | null>(null)
   const [loading, setLoading] = useState(true)
   const [connecting, setConnecting] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
   const [error, setError] = useState('')
 
-  // Check for OAuth callback params in URL
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    if (params.get('x_connected') === 'true') {
-      // Clean URL
-      window.history.replaceState({}, '', window.location.pathname)
-    }
-    if (params.get('x_error')) {
-      setError(`OAuth error: ${params.get('x_error')}`)
-      window.history.replaceState({}, '', window.location.pathname)
-    }
+  const refreshSession = useCallback(async () => {
+    const res = await fetch('/api/import/live')
+    if (!res.ok) throw new Error('Failed to check session')
+    const data = await res.json() as LiveSession
+    setSession(data)
+    return data
   }, [])
 
-  // Fetch status on mount
   useEffect(() => {
-    fetch('/api/import/x-oauth/status')
-      .then(async (r) => {
-        if (!r.ok) throw new Error('Failed to check status')
-        const data: OAuthStatus = await r.json()
-        setStatus(data)
-      })
+    refreshSession()
       .catch(() => setError('Could not connect to the server'))
       .finally(() => setLoading(false))
-  }, [])
+  }, [refreshSession])
 
   async function handleConnect() {
     setError('')
     setConnecting(true)
     try {
-      const res = await fetch('/api/import/x-oauth/authorize')
+      const res = await fetch('/api/import/x-session', { method: 'POST' })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Failed to start OAuth')
-      window.location.href = data.authUrl
+      if (!res.ok) throw new Error(data.error ?? 'Failed to connect X')
+      await refreshSession()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to connect')
+    } finally {
       setConnecting(false)
     }
   }
@@ -709,9 +699,9 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
     setError('')
     setDisconnecting(true)
     try {
-      const res = await fetch('/api/import/x-oauth/disconnect', { method: 'POST' })
+      const res = await fetch('/api/import/live', { method: 'DELETE' })
       if (!res.ok) throw new Error('Failed to disconnect')
-      setStatus({ configured: true, connected: false })
+      setSession({ status: 'needs_browser', connected: false, lastSync: session?.lastSync ?? null })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to disconnect')
     } finally {
@@ -719,25 +709,23 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
     }
   }
 
-  async function handleFetchBookmarks() {
+  async function handleSync() {
     setError('')
     setSyncing(true)
     try {
-      const res = await fetch('/api/import/x-oauth/fetch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ maxPages: 10 }),
-      })
+      const res = await fetch('/api/import/live/sync', { method: 'POST' })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Fetch failed')
+      if (!res.ok) throw new Error(data.error ?? 'Sync failed')
+      await refreshSession()
       onSynced({
         imported: data.imported ?? 0,
         skipped: data.skipped ?? 0,
-        total: data.total ?? 0,
-        parsed: data.total ?? 0,
+        total: (data.imported ?? 0) + (data.skipped ?? 0),
+        parsed: (data.imported ?? 0) + (data.skipped ?? 0),
       })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Fetch failed')
+      setError(err instanceof Error ? err.message : 'Sync failed')
+      void refreshSession().catch(() => {})
     } finally {
       setSyncing(false)
     }
@@ -751,104 +739,92 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
     )
   }
 
+  const connected = session?.status === 'ok'
+  const expired = session?.status === 'expired'
+
   return (
     <div className="space-y-6">
-      {/* Info banner */}
       <div className="text-xs text-zinc-500 space-y-1.5 bg-zinc-800/50 border border-zinc-700/50 rounded-xl p-4">
         <p className="text-zinc-300 font-medium text-sm mb-2 flex items-center gap-2">
-          <ExternalLink size={14} className="text-indigo-400" />
-          X OAuth 2.0 (Recommended)
+          <RefreshCw size={14} className="text-indigo-400" />
+          Incremental X sync
         </p>
-        <p>Connect your X account using the official OAuth 2.0 flow. This is the X-approved method — no cookies or session tokens needed.</p>
-        <p className="text-zinc-600 mt-1">Requires X OAuth Client ID in Settings. Scopes: bookmark.read, tweet.read, users.read</p>
-        <p className="text-amber-400/80 mt-2 font-medium">Note: The X API requires a paid Basic tier ($200/mo) or higher for bookmark.read scope access. The free tier does not support fetching bookmarks.</p>
+        <p>Opens a Chromium window so you can log into X. Siftly stores encrypted session cookies and pulls only new bookmarks.</p>
+        <p className="text-zinc-600 mt-1">Already-imported tweets are skipped. Sync stops after five consecutive known IDs.</p>
       </div>
 
-      {/* Not configured */}
-      {!status?.configured && (
-        <div className="flex items-center gap-3 p-3.5 rounded-xl bg-amber-500/8 border border-amber-500/20">
-          <AlertCircle size={15} className="text-amber-400 shrink-0" />
-          <div>
-            <p className="text-sm text-amber-300">X OAuth not configured</p>
-            <p className="text-xs text-zinc-500 mt-0.5">
-              Add your X OAuth Client ID (and optionally Client Secret) in{' '}
-              <Link href="/settings" className="text-indigo-400 hover:underline">Settings</Link>
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Configured but not connected */}
-      {status?.configured && !status?.connected && (
-        <button
-          onClick={handleConnect}
-          disabled={connecting}
-          className="w-full py-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-white font-medium transition-colors flex items-center justify-center gap-2.5"
-        >
-          {connecting ? (
-            <>
-              <Loader2 size={16} className="animate-spin" />
-              Redirecting to X...
-            </>
-          ) : (
-            <>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
-              Connect X Account
-            </>
-          )}
-        </button>
-      )}
-
-      {/* Connected */}
-      {status?.connected && (
+      {connected ? (
         <>
           <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
             <div className="flex items-center gap-2.5">
               <CheckCircle size={15} className="text-emerald-400 shrink-0" />
               <div>
-                <span className="text-sm text-emerald-300">Connected to X</span>
-                {status.user?.username && (
-                  <span className="text-xs text-zinc-500 ml-2">
-                    <User size={11} className="inline -mt-0.5 mr-0.5" />
-                    @{status.user.username}
-                  </span>
+                <span className="text-sm text-emerald-300">X session connected</span>
+                {session?.lastSync && (
+                  <p className="text-xs text-zinc-500 mt-0.5">
+                    Last sync {new Date(session.lastSync).toLocaleString()}
+                  </p>
                 )}
               </div>
             </div>
             <button
-              onClick={handleDisconnect}
-              disabled={disconnecting}
+              onClick={() => void handleDisconnect()}
+              disabled={disconnecting || connecting || syncing}
               className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-              title="Disconnect X account"
+              title="Disconnect X session"
             >
               {disconnecting ? <Loader2 size={14} className="animate-spin" /> : <LogOut size={14} />}
             </button>
           </div>
 
-          {status.tokenExpired && (
-            <div className="flex items-center gap-2 p-3 rounded-xl bg-amber-500/8 border border-amber-500/20">
-              <AlertCircle size={14} className="text-amber-400 shrink-0" />
-              <p className="text-xs text-amber-300">Token expired. Siftly will try to auto-refresh, or you can reconnect.</p>
-            </div>
-          )}
-
           <button
-            onClick={handleFetchBookmarks}
-            disabled={syncing}
+            onClick={() => void handleSync()}
+            disabled={syncing || connecting}
             className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white font-medium transition-colors flex items-center justify-center gap-2"
           >
             {syncing ? (
               <>
                 <Loader2 size={16} className="animate-spin" />
-                Fetching bookmarks...
+                Syncing new bookmarks…
               </>
             ) : (
               <>
                 <RefreshCw size={16} />
-                Fetch Bookmarks from X
+                Sync new bookmarks
               </>
             )}
           </button>
+        </>
+      ) : (
+        <>
+          {expired && (
+            <div className="flex items-center gap-2 p-3 rounded-xl bg-amber-500/8 border border-amber-500/20">
+              <AlertCircle size={14} className="text-amber-400 shrink-0" />
+              <p className="text-xs text-amber-300">Session expired. Connect again — a browser window will open.</p>
+            </div>
+          )}
+          <button
+            onClick={() => void handleConnect()}
+            disabled={connecting}
+            className="w-full py-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-white font-medium transition-colors flex items-center justify-center gap-2.5"
+          >
+            {connecting ? (
+              <>
+                <Loader2 size={16} className="animate-spin" />
+                Waiting for X login in Chromium…
+              </>
+            ) : (
+              <>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                Connect X
+              </>
+            )}
+          </button>
+          {connecting && (
+            <p className="text-xs text-zinc-500 text-center">
+              Log into X in the window that opened. It closes automatically once bookmarks load.
+            </p>
+          )}
         </>
       )}
 
@@ -861,8 +837,71 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
   )
 }
 
+interface SyncRunRow {
+  id: string
+  trigger: string
+  status: string
+  imported: number
+  skipped: number
+  lastTweetId: string | null
+  errorMessage: string | null
+  startedAt: string
+  finishedAt: string | null
+}
+
+function ImportHistory() {
+  const [runs, setRuns] = useState<SyncRunRow[] | null>(null)
+
+  useEffect(() => {
+    fetch('/api/sync/runs')
+      .then((r) => r.json())
+      .then((d: { runs?: SyncRunRow[] }) => setRuns(d.runs ?? []))
+      .catch(() => setRuns([]))
+  }, [])
+
+  if (!runs || runs.length === 0) return null
+
+  const triggerLabel: Record<string, string> = {
+    json: 'JSON upload',
+    'x-sync': 'X sync',
+    mcp: 'Cursor MCP',
+  }
+
+  return (
+    <div className="mb-6 rounded-xl border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-zinc-800">
+        <Clock size={13} className="text-zinc-500" />
+        <p className="text-xs font-medium text-zinc-400 uppercase tracking-wider">Import history</p>
+      </div>
+      <ul className="divide-y divide-zinc-800/80">
+        {runs.slice(0, 8).map((run) => (
+          <li key={run.id} className="px-4 py-2.5 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm text-zinc-300">
+                {triggerLabel[run.trigger] ?? run.trigger}
+                <span className="text-zinc-600 mx-1.5">·</span>
+                <span className={run.status === 'error' ? 'text-red-400' : run.status === 'running' ? 'text-amber-400' : 'text-zinc-400'}>
+                  {run.status}
+                </span>
+              </p>
+              <p className="text-xs text-zinc-600 mt-0.5 truncate">
+                {new Date(run.startedAt).toLocaleString()}
+                {run.errorMessage ? ` — ${run.errorMessage}` : ''}
+              </p>
+            </div>
+            <p className="text-xs text-zinc-500 shrink-0 tabular-nums">
+              {run.imported} new
+              {run.skipped > 0 ? ` · ${run.skipped} skipped` : ''}
+            </p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 function InstructionsStep({ onFile, importSource, onLiveSynced }: { onFile: (file: File) => void; importSource: 'bookmark' | 'like'; onLiveSynced: (result: ImportResult) => void }) {
-  const [method, setMethod] = useState<Method>('bookmarklet')
+  const [method, setMethod] = useState<Method>('live')
 
   return (
     <div>
@@ -877,7 +916,7 @@ function InstructionsStep({ onFile, importSource, onLiveSynced }: { onFile: (fil
           }`}
         >
           <RefreshCw size={13} className="inline -mt-0.5 mr-1" />
-          Live Import
+          X Sync
           <span className="ml-1.5 text-xs text-indigo-400 font-normal">Recommended</span>
         </button>
         <button
@@ -1339,10 +1378,11 @@ export default function ImportPage() {
     <div className="p-8 max-w-2xl mx-auto">
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-zinc-100">Import Bookmarks</h1>
-        <p className="text-zinc-400 mt-1">Export your X/Twitter bookmarks as JSON, then upload below.</p>
+        <p className="text-zinc-400 mt-1">Sync new bookmarks from X, or upload a JSON export.</p>
       </div>
 
       {step === 1 && <UncategorizedBanner onCategorize={() => setStep(3)} onReprocess={() => { setForceReprocess(true); setStep(3) }} />}
+      {step === 1 && <ImportHistory />}
 
       {importError && (
         <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-4">

@@ -72,3 +72,6 @@ promo-video/
 *~
 
 exports/
+
+# Siftly local session (Playwright profile)
+.siftly-profile/

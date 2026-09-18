@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { Plus, Tag, X, ArrowRight, Folder, Bookmark, Sparkles, Loader2, Check } from 'lucide-react'
+import { Plus, Tag, X, ArrowRight, Folder, Bookmark, Sparkles, Loader2, Check, Trash2, RefreshCw } from 'lucide-react'
 import * as Dialog from '@radix-ui/react-dialog'
 import Link from 'next/link'
 import type { Category } from '@/lib/types'
@@ -400,9 +400,31 @@ function AIAssistantModal({ open, onClose, onCategoriesCreated }: AIAssistantMod
 
 interface CategoryDisplayCardProps {
   category: Category
+  onDeleted: (slug: string) => void
 }
 
-function CategoryDisplayCard({ category }: CategoryDisplayCardProps) {
+function CategoryDisplayCard({ category, onDeleted }: CategoryDisplayCardProps) {
+  const [deleting, setDeleting] = useState(false)
+  const [confirm, setConfirm] = useState(false)
+
+  async function handleDelete() {
+    if (!confirm) {
+      setConfirm(true)
+      return
+    }
+    setDeleting(true)
+    try {
+      const res = await fetch(`/api/categories/${category.slug}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to delete')
+      onDeleted(category.slug)
+    } catch (err) {
+      setDeleting(false)
+      setConfirm(false)
+      alert(err instanceof Error ? err.message : 'Failed to delete category')
+    }
+  }
+
   return (
     <div
       className="bg-zinc-900 border border-zinc-800 rounded-2xl hover:border-zinc-700 transition-all duration-200 overflow-hidden group"
@@ -418,7 +440,22 @@ function CategoryDisplayCard({ category }: CategoryDisplayCardProps) {
               </span>
             )}
           </div>
+          <button
+            onClick={() => void handleDelete()}
+            disabled={deleting}
+            className={`shrink-0 p-1.5 rounded-lg transition-colors ${
+              confirm
+                ? 'bg-red-500/15 text-red-400 hover:bg-red-500/25'
+                : 'text-zinc-600 hover:text-red-400 hover:bg-red-500/10'
+            }`}
+            title={confirm ? `Click again to delete ${category.name}` : 'Delete category'}
+          >
+            {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+          </button>
         </div>
+        {confirm && !deleting && (
+          <p className="text-xs text-red-400/80 mb-2">Click the trash icon again to confirm. Bookmarks stay; this category is removed.</p>
+        )}
 
         {category.description ? (
           <p className="text-sm text-zinc-400 leading-relaxed line-clamp-2 mb-4">{category.description}</p>
@@ -466,6 +503,8 @@ export default function CategoriesPage() {
   const [loading, setLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
   const [aiModalOpen, setAiModalOpen] = useState(false)
+  const [recategorizing, setRecategorizing] = useState(false)
+  const [recatError, setRecatError] = useState('')
 
   useEffect(() => {
     Promise.all([
@@ -486,6 +525,45 @@ export default function CategoriesPage() {
 
   function handleCategoriesCreated(newCategories: Category[]) {
     setCategories(newCategories)
+  }
+
+  function handleDeleted(slug: string) {
+    setCategories((prev) => prev.filter((c) => c.slug !== slug))
+  }
+
+  async function handleRecategorize() {
+    setRecatError('')
+    setRecategorizing(true)
+    try {
+      const res = await fetch('/api/categorize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recategorizeOnly: true }),
+      })
+      const data = await res.json()
+      if (!res.ok && res.status !== 409) throw new Error(data.error ?? 'Failed to start recategorize')
+
+      await new Promise<void>((resolve, reject) => {
+        const poll = window.setInterval(async () => {
+          try {
+            const statusRes = await fetch('/api/categorize')
+            const status = await statusRes.json() as { status: string; error?: string | null }
+            if (status.status === 'idle') {
+              window.clearInterval(poll)
+              if (status.error) reject(new Error(status.error))
+              else resolve()
+            }
+          } catch (err) {
+            window.clearInterval(poll)
+            reject(err)
+          }
+        }, 1000)
+      })
+    } catch (err) {
+      setRecatError(err instanceof Error ? err.message : 'Recategorize failed')
+    } finally {
+      setRecategorizing(false)
+    }
   }
 
   return (
@@ -512,6 +590,17 @@ export default function CategoriesPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {categories.length > 0 && (
+            <button
+              onClick={() => void handleRecategorize()}
+              disabled={recategorizing}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 text-zinc-300 border border-zinc-700 text-sm font-medium transition-colors"
+              title="Reassign all bookmarks into the current category list (no vision/enrichment)"
+            >
+              {recategorizing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+              Recategorize
+            </button>
+          )}
           <button
             onClick={() => setAiModalOpen(true)}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-sm font-medium transition-colors"
@@ -528,6 +617,12 @@ export default function CategoriesPage() {
           </button>
         </div>
       </div>
+
+      {recatError && (
+        <p className="mb-4 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+          {recatError}
+        </p>
+      )}
 
       {/* Loading State */}
       {loading && (
@@ -562,7 +657,7 @@ export default function CategoriesPage() {
       {!loading && categories.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {categories.map((cat) => (
-            <CategoryDisplayCard key={cat.id} category={cat} />
+            <CategoryDisplayCard key={cat.id} category={cat} onDeleted={handleDeleted} />
           ))}
         </div>
       )}

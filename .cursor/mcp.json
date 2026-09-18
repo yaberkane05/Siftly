@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "siftly": {
+      "command": "npm",
+      "args": ["run", "mcp"]
+    }
+  }
+}
