@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { BookmarkIcon, Tag, Image, Layers, Upload, Sparkles, Search, ArrowRight, TrendingUp, Bookmark } from 'lucide-react'
 import prisma from '@/lib/db'
 import BookmarkCard from '@/components/bookmark-card'
+import DashboardGreeting from '@/components/dashboard-greeting'
 import type { BookmarkWithMedia } from '@/lib/types'
 
 const RECENT_QUERY = {
@@ -98,21 +99,6 @@ async function getDashboardData() {
   }
 }
 
-function getGreeting(): string {
-  const hour = new Date().getHours()
-  if (hour < 12) return 'Good morning'
-  if (hour < 17) return 'Good afternoon'
-  return 'Good evening'
-}
-
-function formatDate(): string {
-  return new Date().toLocaleDateString('en-US', {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-  })
-}
-
 interface StatCardProps {
   label: string
   value: number
@@ -138,7 +124,7 @@ function StatCard({ label, value, icon: Icon, iconColor, iconBg, borderColor, tr
           </span>
         )}
       </div>
-      <p className="text-3xl font-bold text-zinc-100 mb-1 tracking-tight">{value.toLocaleString()}</p>
+      <p className="text-3xl font-bold text-zinc-100 mb-1 tracking-tight">{value.toLocaleString('en-US')}</p>
       <p className="text-sm text-zinc-500">{label}</p>
     </>
   )
@@ -163,22 +149,14 @@ export default async function DashboardPage() {
 
       {/* Hero Section */}
       <div>
-        <p className="text-sm text-zinc-500 mb-1 uppercase tracking-widest font-medium">{formatDate()}</p>
         <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl md:text-4xl font-bold text-zinc-100">
-              {getGreeting()} <span className="text-indigo-400">&#128075;</span>
-            </h1>
-            <p className="text-zinc-400 mt-1.5">
-              You have{' '}
-              <span className="text-zinc-100 font-semibold">{data.totalBookmarks.toLocaleString()}</span>{' '}
-              tweets saved and ready to explore.
-              {data.likeSourceCount > 0 && (
-                <span className="text-zinc-500">
-                  {' '}({data.bookmarkSourceCount.toLocaleString()} bookmarks, {data.likeSourceCount.toLocaleString()} likes)
-                </span>
-              )}
-            </p>
+            <DashboardGreeting bookmarkCount={data.totalBookmarks} />
+            {data.likeSourceCount > 0 && (
+              <p className="text-zinc-500 text-sm mt-1">
+                ({data.bookmarkSourceCount.toLocaleString('en-US')} bookmarks, {data.likeSourceCount.toLocaleString('en-US')} likes)
+              </p>
+            )}
           </div>
           {/* Quick Actions */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -210,7 +188,7 @@ export default async function DashboardPage() {
       {/* Stat Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
-          label={data.likeSourceCount > 0 ? `${data.bookmarkSourceCount.toLocaleString()} bookmarks · ${data.likeSourceCount.toLocaleString()} likes` : 'Total Bookmarks'}
+          label={data.likeSourceCount > 0 ? `${data.bookmarkSourceCount.toLocaleString('en-US')} bookmarks · ${data.likeSourceCount.toLocaleString('en-US')} likes` : 'Total Bookmarks'}
           value={data.totalBookmarks}
           icon={BookmarkIcon}
           iconColor="text-indigo-400"

@@ -97,10 +97,7 @@ export default function Nav() {
   const [categories, setCategories] = useState<CategoryItem[]>([])
   const [totalBookmarks, setTotalBookmarks] = useState<number | null>(null)
   const [showAllCats, setShowAllCats] = useState(true)
-  const [collectionsOpen, setCollectionsOpen] = useState(() => {
-    if (typeof window === 'undefined') return true
-    return localStorage.getItem('nav-collections-open') !== 'false'
-  })
+  const [collectionsOpen, setCollectionsOpen] = useState(true)
   const [pipeline, setPipeline] = useState<PipelineStatus | null>(null)
 
   function toggleCollections() {
@@ -114,6 +111,10 @@ export default function Nav() {
   function openSearch() {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))
   }
+
+  useEffect(() => {
+    setCollectionsOpen(localStorage.getItem('nav-collections-open') !== 'false')
+  }, [])
 
   useEffect(() => {
     function handleCleared() {
