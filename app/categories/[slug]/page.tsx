@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { ChevronLeft, ChevronRight, Download, ArrowLeft } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download, ArrowLeft, Loader2 } from 'lucide-react'
 import BookmarkCard from '@/components/bookmark-card'
 import type { BookmarkWithMedia, Category } from '@/lib/types'
 
@@ -54,6 +54,8 @@ export default function CategoryPage() {
   const [data, setData] = useState<CategoryPageData | null>(null)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
 
   const fetchData = useCallback(async (p: number) => {
     setLoading(true)
@@ -87,8 +89,35 @@ export default function CategoryPage() {
     fetchData(page)
   }, [fetchData, page])
 
-  function handleExport() {
-    window.location.href = `/api/export?type=zip&category=${slug}`
+  async function handleExport() {
+    if (exporting) return
+    setExporting(true)
+    setExportError('')
+    try {
+      const res = await fetch(`/api/export?type=zip&category=${encodeURIComponent(slug)}`)
+      const contentType = res.headers.get('content-type') ?? ''
+      if (!res.ok || contentType.includes('application/json')) {
+        const body = await res.json().catch(() => ({})) as { error?: string }
+        throw new Error(body.error ?? 'Export failed')
+      }
+
+      const blob = await res.blob()
+      const filename =
+        res.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] ??
+        `bookmarks-${slug}.zip`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : 'Export failed')
+    } finally {
+      setExporting(false)
+    }
   }
 
   if (loading && !data) {
@@ -112,7 +141,8 @@ export default function CategoryPage() {
     <div className="p-8 max-w-7xl mx-auto">
       <button
         onClick={() => router.push('/categories')}
-        className="flex items-center gap-2 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-6"
+        disabled={exporting}
+        className="flex items-center gap-2 text-sm text-zinc-500 hover:text-zinc-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors mb-6"
       >
         <ArrowLeft size={14} />
         All Categories
@@ -134,13 +164,20 @@ export default function CategoryPage() {
             </div>
           </div>
           <button
-            onClick={handleExport}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm font-medium transition-colors shrink-0"
+            onClick={() => void handleExport()}
+            disabled={exporting}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed text-zinc-300 text-sm font-medium transition-colors shrink-0"
           >
-            <Download size={15} />
-            Export ZIP
+            {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+            {exporting ? 'Exporting…' : 'Export ZIP'}
           </button>
         </div>
+      )}
+
+      {exportError && (
+        <p className="mb-6 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+          {exportError}
+        </p>
       )}
 
       {loading && (
@@ -165,7 +202,24 @@ export default function CategoryPage() {
         </div>
       )}
 
-      <Pagination page={page} total={total} limit={PAGE_SIZE} onChange={setPage} />
+      <Pagination page={page} total={total} limit={PAGE_SIZE} onChange={exporting ? () => {} : setPage} />
+
+      {exporting && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-950/80 backdrop-blur-sm"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="mx-4 w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 px-6 py-7 text-center shadow-2xl shadow-black/50">
+            <Loader2 size={28} className="mx-auto mb-4 animate-spin text-indigo-400" />
+            <p className="text-base font-semibold text-zinc-100">Exporting ZIP</p>
+            <p className="mt-1.5 text-sm text-zinc-500">
+              Packing {total.toLocaleString()} bookmark{total !== 1 ? 's' : ''} and media.
+              Stay on this page — the download starts when it is ready.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
